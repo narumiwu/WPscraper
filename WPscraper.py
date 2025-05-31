@@ -8,16 +8,19 @@ import argparse
 import logging
 import requests
 from bs4 import BeautifulSoup
+from pathlib import Path
+from typing import Set
 
-# Jika ingin menggunakan modul googlesearch‐python, pastikan sudah terinstall:
-#   pip install googlesearch-python
-# Jika import ini gagal, skrip akan langsung keluar dengan pesan error.
-try:
-    from googlesearch import search
-except ImportError:
-    print("[ERROR] Modul googlesearch tidak ditemukan. Pastikan Anda telah menginstall 'googlesearch-python'.")
-    sys.exit(1)
+# ──────────────────────────────────────────────────────────────────────────────
+#   Google Custom Search API Credentials (ganti dengan milik Anda)
+# ──────────────────────────────────────────────────────────────────────────────
+API_KEY = "AIzaSyCUaVp0gWKw1B5FmFiplAXl-gkwQEr_rVg"
+CX_ID   = "c680430dddc14447"
 
+# ──────────────────────────────────────────────────────────────────────────────
+#  File untuk menyimpan daftar domain yang sudah pernah di‐scrap
+# ──────────────────────────────────────────────────────────────────────────────
+SCANNED_FILE = Path(".wpscraper_scanned")
 
 # ──────────────────────────────────────────────────────────────────────────────
 #   Konfigurasi logging sederhana
@@ -28,6 +31,20 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
+# ──────────────────────────────────────────────────────────────────────────────
+#  Fungsi: baca daftar domain yang sudah disimpan
+# ──────────────────────────────────────────────────────────────────────────────
+def read_scanned() -> Set[str]:
+    if SCANNED_FILE.exists():
+        return {line.strip() for line in SCANNED_FILE.read_text(encoding="utf-8").splitlines() if line.strip()}
+    return set()
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Fungsi: tambahkan satu domain ke file scanned
+# ──────────────────────────────────────────────────────────────────────────────
+def append_scanned(domain: str) -> None:
+    with SCANNED_FILE.open("a", encoding="utf-8") as f:
+        f.write(domain + "\n")
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Fungsi: fetch_and_extract_text
@@ -48,9 +65,7 @@ def fetch_and_extract_text(url: str, timeout: float = 10.0) -> str:
         logging.warning(f"Gagal mengambil URL `{url}`: {e}")
         return ""
 
-    # Parse HTML
     soup = BeautifulSoup(resp.text, "html.parser")
-    # Hapus elemen yang tidak diinginkan
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
 
@@ -58,25 +73,25 @@ def fetch_and_extract_text(url: str, timeout: float = 10.0) -> str:
     if not body:
         return ""
 
-    # Ambil teks, normalisasi whitespace
     text = body.get_text(separator="\n", strip=True)
     return text
 
-
 # ──────────────────────────────────────────────────────────────────────────────
-#  Fungsi: get_wp_targets
-#    Mencari situs WordPress di Google dengan beberapa dork, lalu
-#    mengembalikan daftar URL domain unik hingga mencapai `limit`.
+#  Fungsi: get_wp_targets_cse
+#    Mencari situs WordPress di Google Custom Search API dengan beberapa dork,
+#    lalu mengembalikan daftar URL domain unik hingga mencapai `total_limit`.
 # ──────────────────────────────────────────────────────────────────────────────
-def get_wp_targets(site_domain: str, total_limit: int, per_dork_limit: int, delay_between: float) -> list:
+def get_wp_targets_cse(site_domain: str,
+                       total_limit: int,
+                       per_dork_limit: int,
+                       delay_between: float) -> list:
     """
-    Mengumpulkan URL domain situs WordPress di dalam `site_domain` (misal: or.id),
-    menggunakan beberapa dork berbeda. 
-    - total_limit: max total URL unik yang diinginkan.
-    - per_dork_limit: hasil maks per dork (Google Search).
-    - delay_between: jeda (detik) antara satu panggilan Google ke berikutnya.
+    Mengumpulkan URL root domain situs WordPress di dalam `site_domain` (misal: or.id),
+    menggunakan beberapa dork berbeda lewat Google Custom Search JSON API.
+    - total_limit: batas total URL unik yang diinginkan.
+    - per_dork_limit: batas hasil unik per dork.
+    - delay_between: jeda (detik) antara panggilan API.
     """
-    # Daftar dork‐dork WordPress paling umum:
     dorks = [
         f'inurl:wp-content site:{site_domain}',
         f'inurl:"/wp-content/themes/" site:{site_domain}',
@@ -86,45 +101,61 @@ def get_wp_targets(site_domain: str, total_limit: int, per_dork_limit: int, dela
     ]
 
     found_urls = set()
+    base_url = "https://www.googleapis.com/customsearch/v1"
+
     for dork in dorks:
         logging.info(f"🔍 Mencari dengan dork: {dork!r}")
-        count = 0
-        try:
-            # Modul `search(...)` mengembalikan generator/iterator yang menghasilkan URL
-            for url in search(dork, num_results=per_dork_limit):
-                # Ekstrak domain root (misal: https://contoh.or.id)
-                m = re.match(r"https?://[^/]+", url)
-                if m:
-                    domain_root = m.group(0)
-                    found_urls.add(domain_root)
-                count += 1
-                if count >= per_dork_limit:
-                    break
-                time.sleep(delay_between)
-        except Exception as e:
-            logging.error(f"  Gagal saat memanggil Google Search untuk dork `{dork}`: {e}")
-            # Lanjutkan ke dork berikutnya
-            continue
+        start_index = 1
+        fetched_for_this_dork = 0
 
-        # Jika sudah mencapai jumlah total_limit, hentikan loop dork
+        while fetched_for_this_dork < per_dork_limit:
+            batch_size = min(10, per_dork_limit - fetched_for_this_dork)
+            params = {
+                "key": API_KEY,
+                "cx": CX_ID,
+                "q": dork,
+                "start": start_index,
+                "num": batch_size
+            }
+            try:
+                resp = requests.get(base_url, params=params, timeout=10)
+                data = resp.json().get("items", [])
+            except Exception as e:
+                logging.warning(f"  Gagal panggil CSE API (dork `{dork}`, start={start_index}): {e}")
+                break
+
+            if not data:
+                break  # Tidak ada hasil lagi untuk dork ini
+
+            for item in data:
+                link = item.get("link", "")
+                m = re.match(r"https?://[^/]+", link)
+                if m:
+                    found_urls.add(m.group(0))
+
+            fetched_for_this_dork += len(data)
+            start_index += len(data)
+
+            if len(found_urls) >= total_limit:
+                break
+
+            time.sleep(delay_between)
+
         if len(found_urls) >= total_limit:
             break
 
-        # Istirahat sejenak (sudah ada delay_between di dalam loop, tapi menambahkan ekstra delay)
         time.sleep(delay_between)
 
-    # Kembalikan sebagai list, di‐slice hingga total_limit
     result_list = list(found_urls)[:total_limit]
-    logging.info(f"✅ Total URL unik yang dikumpulkan: {len(result_list)} (limit={total_limit})")
+    logging.info(f"✅ Total URL unik yang terkumpul: {len(result_list)} (limit={total_limit})")
     return result_list
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Fungsi utama (main)
 # ──────────────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
-        description="Scrape konten WordPress dari Google (multi‐dork) dan simpan ke file .txt"
+        description="WPscraper — Scrape konten WordPress via Google CSE API (multi‐dork)"
     )
     parser.add_argument(
         "--domain",
@@ -134,20 +165,20 @@ def main():
     parser.add_argument(
         "--limit",
         type=int,
-        default=30,
-        help="Jumlah maksimum total situs unik WordPress yang ingin diambil (default: 30)."
+        default=200,
+        help="Jumlah maksimum total situs unik WordPress yang ingin diambil (default: 200)."
     )
     parser.add_argument(
         "--per-dork",
         type=int,
-        default=10,
-        help="Maks hasil per dork Google (default: 10)."
+        default=25,
+        help="Maksimum hasil unik per dork Google (default: 25)."
     )
     parser.add_argument(
         "--delay",
         type=float,
         default=1.0,
-        help="Jeda (detik) antara setiap panggilan Google Search (default: 1.0)."
+        help="Jeda (detik) antara setiap panggilan ke CSE API (default: 1.0)."
     )
     parser.add_argument(
         "--timeout-fetch",
@@ -169,36 +200,48 @@ def main():
     timeout_fetch = args.timeout_fetch
     output_file = args.output
 
-    logging.info(f"🚀 Mulai proses: domain={domain!r}, total_limit={total_limit}, per_dork={per_dork_limit}")
-    # 1) Kumpulkan daftar target WordPress
-    targets = get_wp_targets(domain, total_limit, per_dork_limit, delay_between)
-    if not targets:
-        logging.error("❌ Tidak ada target WordPress yang ditemukan. Proses dihentikan.")
+    # 1) Baca daftar domain yang sudah tercatat
+    scanned = read_scanned()
+    logging.info(f"💾 Sudah pernah discrap: {len(scanned)} domain")
+
+    # 2) Agar hasil akhir berjumlah `total_limit` domain baru, tarik `limit + scanned_count`
+    cse_fetch_limit = total_limit + len(scanned)
+    logging.info(f"🚀 Mulai mengumpulkan target (limit+scanned={cse_fetch_limit})")
+    all_targets = get_wp_targets_cse(domain, cse_fetch_limit, per_dork_limit, delay_between)
+
+    # 3) Filter supaya hanya domain baru (belum pernah di‐scrap), lalu batasi ke `total_limit`
+    new_targets = [t for t in all_targets if t not in scanned][:total_limit]
+    if not new_targets:
+        logging.info("🔄 Tidak ada target baru yang belum pernah discrap. Proses dihentikan.")
         sys.exit(0)
 
-    # 2) Buka file output untuk ditulis
+    logging.info(f"✨ Ditemukan {len(new_targets)} target baru yang akan discrap.")
+
+    # 4) Buka file output (mode append)
     try:
-        outf = open(output_file, "w", encoding="utf-8")
+        outf = open(output_file, "a", encoding="utf-8")
     except Exception as e:
         logging.error(f"Gagal membuka file `{output_file}` untuk ditulis: {e}")
         sys.exit(1)
 
-    # 3) Ambil konten setiap situs dan simpan ke file
-    for idx, site_url in enumerate(targets, start=1):
-        logging.info(f"[{idx}/{len(targets)}] Fetch teks dari: {site_url}")
+    # 5) Iterasi tiap target baru, ambil teks, tulis, dan catat sebagai 'scanned'
+    for idx, site_url in enumerate(new_targets, start=1):
+        logging.info(f"[{idx}/{len(new_targets)}] Fetch & ekstrak teks: {site_url}")
         page_text = fetch_and_extract_text(site_url, timeout=timeout_fetch)
         if page_text:
-            # Tulis header URL
             outf.write(f"--- URL: {site_url}\n")
             outf.write(page_text + "\n\n")
             outf.write(("=" * 80) + "\n\n")
         else:
-            logging.warning(f"   (⚠️) Tidak ada teks yang berhasil diambil dari: {site_url}")
-        # Jeda sebentar agar tidak mem‐spam
+            logging.warning(f"   (⚠️) Gagal mengekstrak teks dari: {site_url}")
+
+        # Simpan domain ke file scanned
+        append_scanned(site_url)
+        # Jeda sebelum request berikutnya
         time.sleep(delay_between)
 
     outf.close()
-    logging.info(f"✅ Selesai. Semua hasil disimpan di `{output_file}`.")
+    logging.info(f"✅ Proses selesai. Semua hasil ditambahkan di `{output_file}` dan domain tercatat di `{SCANNED_FILE}`.")
 
 
 if __name__ == "__main__":
