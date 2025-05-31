@@ -6,6 +6,7 @@ import time
 import sys
 import argparse
 import logging
+import requests                    # <― Pastikan modul requests di‐import
 from pathlib import Path
 from typing import Set
 
