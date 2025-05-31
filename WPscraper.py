@@ -6,7 +6,7 @@ import time
 import sys
 import argparse
 import logging
-import requests                    # <― Pastikan modul requests di‐import
+import requests
 from pathlib import Path
 from typing import Set
 
@@ -45,7 +45,11 @@ except ImportError:
 # ──────────────────────────────────────────────────────────────────────────────
 def read_scanned() -> Set[str]:
     if SCANNED_FILE.exists():
-        return {line.strip() for line in SCANNED_FILE.read_text(encoding="utf-8").splitlines() if line.strip()}
+        return {
+            line.strip()
+            for line in SCANNED_FILE.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        }
     return set()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -68,16 +72,17 @@ def get_wp_targets_cse(site_domain: str,
     melalui Google Custom Search JSON API, hingga mencapai `total_limit`. Jika CSE API
     untuk suatu dork mengembalikan 0 hasil, fallback ke googlesearch.search() (jika tersedia).
     """
+    # —————— PERBAIKAN: tiap dork sekarang dipisahkan "inurl:… site:…" ——————
     dorks = [
         f'inurl:wp-content site:{site_domain}',
         f'inurl:"/wp-content/themes/" site:{site_domain}',
         f'inurl:readme.html site:{site_domain}',
         f'"Powered by WordPress" site:{site_domain}',
         f'intitle:"Just another WordPress site" site:{site_domain}',
-        f'inurl:index.php:{site_domain}',
-        f'inurl:".php?id=":{site_domain}',
-        f'inurl:"index.php?id=":{site_domain}',
-        f'inurl:"index.php?m=content+c=rss+catid=10":{site_domain}',
+        f'inurl:index.php site:{site_domain}',
+        f'inurl:".php?id=" site:{site_domain}',
+        f'inurl:"index.php?id=" site:{site_domain}',
+        f'inurl:"index.php?m=content+c=rss+catid=10" site:{site_domain}',
     ]
 
     found_urls = set()
@@ -89,7 +94,7 @@ def get_wp_targets_cse(site_domain: str,
         fetched_for_this_dork = 0
         cse_found_this_dork = 0
 
-        # Tarik via CSE API dulu, maksimum per_dork_limit
+        # 1) Tarik via CSE API dulu, maksimum per_dork_limit
         while fetched_for_this_dork < per_dork_limit:
             batch_size = min(10, per_dork_limit - fetched_for_this_dork)
             params = {
@@ -125,7 +130,7 @@ def get_wp_targets_cse(site_domain: str,
 
             time.sleep(delay_between)
 
-        # Jika CSE API mengembalikan 0 untuk dork ini, fallback ke googlesearch jika tersedia
+        # 2) Jika CSE API mengembalikan 0 untuk dork ini, fallback ke googlesearch kalau ada
         if cse_found_this_dork == 0 and FALLBACK_GOOGLESEARCH:
             logging.info(f"   ⚠️ CSE API tidak ada hasil untuk `{dork}`. Fallback pakai googlesearch.")
             fallback_count = 0
@@ -171,7 +176,7 @@ def main():
     parser.add_argument(
         "--per-dork",
         type=int,
-        default=50,
+        default=50,   # <— Anda minta per_dork=50
         help="Maksimum hasil unik per dork Google (default: 50)."
     )
     parser.add_argument(
