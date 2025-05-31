@@ -176,8 +176,8 @@ def main():
     parser.add_argument(
         "--per-dork",
         type=int,
-        default=50,   # <— Anda minta per_dork=50
-        help="Maksimum hasil unik per dork Google (default: 50)."
+        default=25,   # <— Anda minta per_dork=25
+        help="Maksimum hasil unik per dork Google (default: 25)."
     )
     parser.add_argument(
         "--delay",
