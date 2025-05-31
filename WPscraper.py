@@ -32,6 +32,17 @@ logging.basicConfig(
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
+#  Cobalah import modul googlesearch; jika tidak ada, fallback=False
+# ──────────────────────────────────────────────────────────────────────────────
+try:
+    from googlesearch import search
+    FALLBACK_GOOGLESEARCH = True
+except ImportError:
+    FALLBACK_GOOGLESEARCH = False
+    logging.warning("Modul googlesearch-python tidak terinstall. "
+                    "Jika CSE API gagal, dork akan di-skip.")
+
+# ──────────────────────────────────────────────────────────────────────────────
 #  Fungsi: baca daftar domain yang sudah disimpan
 # ──────────────────────────────────────────────────────────────────────────────
 def read_scanned() -> Set[str]:
@@ -80,6 +91,7 @@ def fetch_and_extract_text(url: str, timeout: float = 10.0) -> str:
 #  Fungsi: get_wp_targets_cse
 #    Mencari situs WordPress di Google Custom Search API dengan beberapa dork,
 #    lalu mengembalikan daftar URL domain unik hingga mencapai `total_limit`.
+#    Jika CSE mengembalikan 0 untuk satu dork, maka fallback ke googlesearch.search()
 # ──────────────────────────────────────────────────────────────────────────────
 def get_wp_targets_cse(site_domain: str,
                        total_limit: int,
@@ -91,6 +103,8 @@ def get_wp_targets_cse(site_domain: str,
     - total_limit: batas total URL unik yang diinginkan.
     - per_dork_limit: batas hasil unik per dork.
     - delay_between: jeda (detik) antara panggilan API.
+    Fallback: jika CSE API tidak mengembalikan hasil untuk suatu dork,
+              dan modul googlesearch-python tersedia, maka coba scraping biasa.
     """
     dorks = [
         f'inurl:wp-content site:{site_domain}',
@@ -104,10 +118,12 @@ def get_wp_targets_cse(site_domain: str,
     base_url = "https://www.googleapis.com/customsearch/v1"
 
     for dork in dorks:
-        logging.info(f"🔍 Mencari dengan dork: {dork!r}")
+        logging.info(f"🔍 Mencari dengan dork (CSE):    {dork!r}")
         start_index = 1
         fetched_for_this_dork = 0
+        cse_found_this_dork = 0
 
+        # 1) Tarik via CSE API dulu, sebanyak per_dork_limit (batch 10)
         while fetched_for_this_dork < per_dork_limit:
             batch_size = min(10, per_dork_limit - fetched_for_this_dork)
             params = {
@@ -121,11 +137,11 @@ def get_wp_targets_cse(site_domain: str,
                 resp = requests.get(base_url, params=params, timeout=10)
                 data = resp.json().get("items", [])
             except Exception as e:
-                logging.warning(f"  Gagal panggil CSE API (dork `{dork}`, start={start_index}): {e}")
-                break
+                logging.warning(f"  ❌ CSE API gagal (dork `{dork}`, start={start_index}): {e}")
+                data = []
 
             if not data:
-                break  # Tidak ada hasil lagi untuk dork ini
+                break  # tidak ada hasil via CSE lagi
 
             for item in data:
                 link = item.get("link", "")
@@ -133,17 +149,38 @@ def get_wp_targets_cse(site_domain: str,
                 if m:
                     found_urls.add(m.group(0))
 
-            fetched_for_this_dork += len(data)
-            start_index += len(data)
+            num_got = len(data)
+            fetched_for_this_dork += num_got
+            cse_found_this_dork += num_got
+            start_index += num_got
 
             if len(found_urls) >= total_limit:
                 break
 
             time.sleep(delay_between)
 
+        # Kalau CSE API mengembalikan **0** hasil untuk dork ini,
+        # dan modul googlesearch-python tersedia, kita fallback:
+        if cse_found_this_dork == 0 and FALLBACK_GOOGLESEARCH:
+            logging.info(f"   ⚠️ CSE API tidak mengembalikan hasil untuk `{dork}`. Fallback gunakan googlesearch.")
+            fallback_count = 0
+            try:
+                # Ambil hingga per_dork_limit domain unik via googlesearch.search()
+                for url in search(dork, num_results=per_dork_limit):
+                    m = re.match(r"https?://[^/]+", url)
+                    if m:
+                        found_urls.add(m.group(0))
+                    fallback_count += 1
+                    if fallback_count >= per_dork_limit:
+                        break
+                    time.sleep(delay_between)
+            except Exception as e:
+                logging.warning(f"   ❌ Fallback googlesearch gagal (dork `{dork}`): {e}")
+
         if len(found_urls) >= total_limit:
             break
 
+        # Beri jeda ekstra sebelum dork berikutnya
         time.sleep(delay_between)
 
     result_list = list(found_urls)[:total_limit]
@@ -155,7 +192,7 @@ def get_wp_targets_cse(site_domain: str,
 # ──────────────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
-        description="WPscraper — Scrape konten WordPress via Google CSE API (multi‐dork)"
+        description="WPscraper — Scrape konten WordPress via Google CSE API (+ fallback googlesearch) (multi‐dork)"
     )
     parser.add_argument(
         "--domain",
@@ -178,7 +215,7 @@ def main():
         "--delay",
         type=float,
         default=1.0,
-        help="Jeda (detik) antara setiap panggilan ke CSE API (default: 1.0)."
+        help="Jeda (detik) antara setiap panggilan ke CSE API / fallback (default: 1.0)."
     )
     parser.add_argument(
         "--timeout-fetch",
@@ -204,12 +241,12 @@ def main():
     scanned = read_scanned()
     logging.info(f"💾 Sudah pernah discrap: {len(scanned)} domain")
 
-    # 2) Agar hasil akhir berjumlah `total_limit` domain baru, tarik `limit + scanned_count`
+    # 2) Jika ingin target bersih sebanyak total_limit, tarik total_limit+scanned_count
     cse_fetch_limit = total_limit + len(scanned)
     logging.info(f"🚀 Mulai mengumpulkan target (limit+scanned={cse_fetch_limit})")
     all_targets = get_wp_targets_cse(domain, cse_fetch_limit, per_dork_limit, delay_between)
 
-    # 3) Filter supaya hanya domain baru (belum pernah di‐scrap), lalu batasi ke `total_limit`
+    # 3) Filter supaya hanya domain baru (belum pernah di‐scrap), lalu batasi ke total_limit
     new_targets = [t for t in all_targets if t not in scanned][:total_limit]
     if not new_targets:
         logging.info("🔄 Tidak ada target baru yang belum pernah discrap. Proses dihentikan.")
