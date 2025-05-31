@@ -11,10 +11,15 @@ from pathlib import Path
 from typing import Set
 
 # ──────────────────────────────────────────────────────────────────────────────
-#   Google Custom Search API Credentials (ganti dengan milik Anda)
+#   Google Custom Search API Credentials
+#   (API pertama dan API kedua untuk fallback kuota)
 # ──────────────────────────────────────────────────────────────────────────────
-API_KEY = "AIzaSyCUaVp0gWKw1B5FmFiplAXl-gkwQEr_rVg"
-CX_ID   = "c680430dddc144471"
+API_KEY_1 = "AIzaSyCUaVp0gWKw1B5FmFiplAXl-gkwQEr_rVg"
+CX_ID_1   = "c680430dddc144471"
+
+# *API kedua (jika API pertama kehabisan kuota, langsung ganti ke sini)*
+API_KEY_2 = "AIzaSyCUaVp0gN7eIlqmwQOKwonDyTdl6-5I"
+CX_ID_2   = "5454d756488a94e30"
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  File untuk menyimpan daftar domain yang sudah pernah di‐scrap
@@ -38,7 +43,10 @@ try:
     FALLBACK_GOOGLESEARCH = True
 except ImportError:
     FALLBACK_GOOGLESEARCH = False
-    logging.warning("Modul googlesearch-python tidak terinstall. Jika CSE API gagal, dork akan di-skip.")
+    logging.warning(
+        "Modul googlesearch-python tidak terinstall. "
+        "Jika CSE API gagal, dork akan di-skip."
+    )
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Fungsi: baca daftar domain yang sudah disimpan
@@ -62,58 +70,105 @@ def append_scanned(domain: str) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 #  Fungsi: get_wp_targets_cse
 #    Mengumpulkan root‐domain WordPress via Google CSE API (+ fallback).
+#    Otomatis beralih ke API kedua jika API pertama gagal.
 # ──────────────────────────────────────────────────────────────────────────────
-def get_wp_targets_cse(site_domain: str,
-                       total_limit: int,
-                       per_dork_limit: int,
-                       delay_between: float) -> list:
+def get_wp_targets_cse(
+    site_domain: str,
+    total_limit: int,
+    per_dork_limit: int,
+    delay_between: float
+) -> list:
     """
     Mengumpulkan root domain situs WordPress di `site_domain` menggunakan beberapa dork
-    melalui Google Custom Search JSON API, hingga mencapai `total_limit`. Jika CSE API
-    untuk suatu dork mengembalikan 0 hasil, fallback ke googlesearch.search() (jika tersedia).
+    melalui Google Custom Search JSON API, hingga mencapai `total_limit`. Jika API pertama
+    gagal (status != 200 atau JSON tidak memuat 'items'), langsung gunakan API kedua.
+    Jika API kedua juga gagal, barulah fallback ke googlesearch.search().
     """
-    # —————— PERBAIKAN: tiap dork sekarang dipisahkan "inurl:… site:…" ——————
+    # Daftar dork (pastikan format "inurl:… site:…" sudah benar)
     dorks = [
         f'inurl:wp-content site:{site_domain}',
+        f'inurl:wp-login.php site:{site_domain}',
         f'inurl:"/wp-content/themes/" site:{site_domain}',
         f'inurl:readme.html site:{site_domain}',
         f'"Powered by WordPress" site:{site_domain}',
         f'intitle:"Just another WordPress site" site:{site_domain}',
-        f'inurl:index.php site:{site_domain}',
-        f'inurl:".php?id=" site:{site_domain}',
-        f'inurl:"index.php?id=" site:{site_domain}',
-        f'inurl:"index.php?m=content+c=rss+catid=10" site:{site_domain}',
     ]
 
     found_urls = set()
     base_url = "https://www.googleapis.com/customsearch/v1"
 
+    # Kita mulai tiap dork
     for dork in dorks:
         logging.info(f"🔍 Mencari dengan dork (CSE): {dork!r}")
         start_index = 1
         fetched_for_this_dork = 0
         cse_found_this_dork = 0
 
-        # 1) Tarik via CSE API dulu, maksimum per_dork_limit
+        # Variabel lokal untuk menyimpan API key/CX yang sedang dipakai:
+        key = API_KEY_1
+        cx = CX_ID_1
+        using_api = 1  # 1 berarti pakai API pertama; 2 berarti pakai API kedua
+
+        # Tarik via CSE API hingga per_dork_limit, tapi pakai batch 10
         while fetched_for_this_dork < per_dork_limit:
             batch_size = min(10, per_dork_limit - fetched_for_this_dork)
             params = {
-                "key": API_KEY,
-                "cx": CX_ID,
+                "key": key,
+                "cx": cx,
                 "q": dork,
                 "start": start_index,
                 "num": batch_size
             }
+
+            data = []
             try:
                 resp = requests.get(base_url, params=params, timeout=10)
-                data = resp.json().get("items", [])
+                if resp.status_code == 200:
+                    data = resp.json().get("items", [])
+                else:
+                    # Jika API pertama (using_api==1) gagal, langsung coba API kedua
+                    if using_api == 1:
+                        logging.warning(
+                            f"  ⚠️ API#1 gagal (dork `{dork}`, status={resp.status_code}). "
+                            "Beralih ke API kedua…"
+                        )
+                        key = API_KEY_2
+                        cx = CX_ID_2
+                        using_api = 2
+                        time.sleep(1)
+                        continue
+                    else:
+                        # API kedua juga gagal, hentikan loop dan ke fallback
+                        logging.warning(
+                            f"  ⚠️ API#2 gagal (dork `{dork}`, status={resp.status_code}). "
+                            "Siap fallback ke googlesearch."
+                        )
+                        data = []
+                # End if resp.status_code
             except Exception as e:
-                logging.warning(f"  ❌ CSE API gagal (dork `{dork}`, start={start_index}): {e}")
-                data = []
+                # Kondisi “request exception” juga memicu pindah API key jika masih di API pertama
+                if using_api == 1:
+                    logging.warning(
+                        f"  ❌ API#1 exception (dork `{dork}`, idx={start_index}): {e}. "
+                        "Beralih ke API kedua…"
+                    )
+                    key = API_KEY_2
+                    cx = CX_ID_2
+                    using_api = 2
+                    time.sleep(1)
+                    continue
+                else:
+                    logging.warning(
+                        f"  ❌ API#2 exception (dork `{dork}`, idx={start_index}): {e}. "
+                        "Siap fallback ke googlesearch."
+                    )
+                    data = []
+            # End try / except
 
             if not data:
-                break  # tidak ada hasil via CSE
+                break  # hentikan loop CSE jika kedua API gagal atau tidak ada hasil
 
+            # Proses data yg berhasil dipanggil (items)
             for item in data:
                 link = item.get("link", "")
                 m = re.match(r"https?://[^/]+", link)
@@ -125,14 +180,19 @@ def get_wp_targets_cse(site_domain: str,
             cse_found_this_dork += num_got
             start_index += num_got
 
+            # Jika sudah cukup mencapai total_limit, hentikan semuanya
             if len(found_urls) >= total_limit:
                 break
 
             time.sleep(delay_between)
 
-        # 2) Jika CSE API mengembalikan 0 untuk dork ini, fallback ke googlesearch kalau ada
+        # Jika CSE API **benar‐benar** tidak mengembalikan satupun (cse_found_this_dork == 0),
+        # dan modul googlesearch‐python terinstall, baru pakai fallback:
         if cse_found_this_dork == 0 and FALLBACK_GOOGLESEARCH:
-            logging.info(f"   ⚠️ CSE API tidak ada hasil untuk `{dork}`. Fallback pakai googlesearch.")
+            logging.info(
+                f"   ⚠️ CSE API (baik API#1 maupun API#2) tidak ada hasil untuk `{dork}`. "
+                "Fallback pakai googlesearch."
+            )
             fallback_count = 0
             try:
                 for url in search(dork, num_results=per_dork_limit):
@@ -160,7 +220,7 @@ def get_wp_targets_cse(site_domain: str,
 # ──────────────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
-        description="WPscraper — Hanya fetch root‐link WordPress via Google CSE API (+ fallback)"
+        description="WPscraper — Hanya fetch root‐link WordPress via Google CSE API (dua API keys) + fallback"
     )
     parser.add_argument(
         "--domain",
@@ -176,7 +236,7 @@ def main():
     parser.add_argument(
         "--per-dork",
         type=int,
-        default=25,   # <— Anda minta per_dork=25
+        default=25,
         help="Maksimum hasil unik per dork Google (default: 25)."
     )
     parser.add_argument(
@@ -198,16 +258,16 @@ def main():
     delay_between = args.delay
     output_file = args.output
 
-    # 1) Baca daftar domain yang sudah tercatat
+    # 1) Baca daftar domain yg sudah tercatat
     scanned = read_scanned()
     logging.info(f"💾 Sudah pernah discrap: {len(scanned)} domain")
 
-    # 2) Tarik `total_limit + scanned_count` agar nanti kita tetap mendapatkan `total_limit` domain baru
+    # 2) Tarik `total_limit + scanned_count` agar nanti tetap dapat `total_limit` domain baru
     cse_fetch_limit = total_limit + len(scanned)
     logging.info(f"🚀 Mulai mengumpulkan tautan (limit+scanned={cse_fetch_limit})")
     all_targets = get_wp_targets_cse(domain, cse_fetch_limit, per_dork_limit, delay_between)
 
-    # 3) Filter hanya domain yang belum discrap, lalu batasi ke `total_limit`
+    # 3) Filter hanya domain baru (belum pernah diskrip), lalu batasi ke `total_limit`
     new_targets = [t for t in all_targets if t not in scanned][:total_limit]
     if not new_targets:
         logging.info("🔄 Tidak ada domain baru. Proses dihentikan.")
@@ -230,8 +290,9 @@ def main():
         time.sleep(delay_between)
 
     outf.close()
-    logging.info(f"✅ Selesai. Semua link domain disimpan di `{output_file}` dan domain tercatat di `{SCANNED_FILE}`.")
-
+    logging.info(
+        f"✅ Selesai. Semua link domain disimpan di `{output_file}` dan domain tercatat di `{SCANNED_FILE}`."
+    )
 
 if __name__ == "__main__":
     main()
