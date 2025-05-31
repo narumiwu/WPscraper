@@ -73,7 +73,7 @@ def get_wp_targets_cse(site_domain: str,
         f'inurl:"/wp-content/themes/" site:{site_domain}',
         f'inurl:readme.html site:{site_domain}',
         f'"Powered by WordPress" site:{site_domain}',
-        f'intitle:"Just another WordPress site" site:{site_domain}'
+        f'intitle:"Just another WordPress site" site:{site_domain}',
         f'inurl:index.php:{site_domain}',
         f'inurl:".php?id=":{site_domain}',
         f'inurl:"index.php?id=":{site_domain}',
