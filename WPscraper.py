@@ -74,6 +74,10 @@ def get_wp_targets_cse(site_domain: str,
         f'inurl:readme.html site:{site_domain}',
         f'"Powered by WordPress" site:{site_domain}',
         f'intitle:"Just another WordPress site" site:{site_domain}'
+        f'inurl:index.php:{site_domain}',
+        f'inurl:".php?id=":{site_domain}',
+        f'inurl:"index.php?id=":{site_domain}',
+        f'inurl:"index.php?m=content+c=rss+catid=10":{site_domain}',
     ]
 
     found_urls = set()
@@ -167,14 +171,14 @@ def main():
     parser.add_argument(
         "--per-dork",
         type=int,
-        default=25,
-        help="Maksimum hasil unik per dork Google (default: 25)."
+        default=50,
+        help="Maksimum hasil unik per dork Google (default: 50)."
     )
     parser.add_argument(
         "--delay",
         type=float,
-        default=1.0,
-        help="Jeda (detik) antara setiap panggilan ke CSE API / fallback (default: 1.0)."
+        default=2.0,
+        help="Jeda (detik) antara setiap panggilan ke CSE API / fallback (default: 2.0)."
     )
     parser.add_argument(
         "--output",
