@@ -15,7 +15,7 @@ from typing import Set
 #   Google Custom Search API Credentials (ganti dengan milik Anda)
 # ──────────────────────────────────────────────────────────────────────────────
 API_KEY = "AIzaSyCUaVp0gWKw1B5FmFiplAXl-gkwQEr_rVg"
-CX_ID   = "c680430dddc14447"
+CX_ID   = "c680430dddc144471"
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  File untuk menyimpan daftar domain yang sudah pernah di‐scrap
