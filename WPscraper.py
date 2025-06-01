@@ -4,6 +4,7 @@
 import re
 import time
 import sys
+import os
 import argparse
 import logging
 import requests
@@ -70,21 +71,24 @@ def append_scanned(domain: str) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 #  Fungsi: get_wp_targets_cse
 #    Mengumpulkan root‐domain WordPress via Google CSE API (+ fallback).
-#    Otomatis beralih ke API kedua jika API pertama gagal.
+#    Otomatis beralih ke API kedua jika API pertama gagal. Menggunakan proxy
+#    jika --proxy di-pasangkan.
 # ──────────────────────────────────────────────────────────────────────────────
 def get_wp_targets_cse(
     site_domain: str,
     total_limit: int,
     per_dork_limit: int,
-    delay_between: float
+    delay_between: float,
+    proxy: str = None
 ) -> list:
     """
     Mengumpulkan root domain situs WordPress di `site_domain` menggunakan beberapa dork
     melalui Google Custom Search JSON API, hingga mencapai `total_limit`. Jika API pertama
     gagal (status != 200 atau JSON tidak memuat 'items'), langsung gunakan API kedua.
-    Jika API kedua juga gagal, barulah fallback ke googlesearch.search().
+    Jika API kedua juga gagal, barulah fallback ke googlesearch.search() (menggunakan proxy
+    juga jika tersedia).
     """
-    # Daftar dork (pastikan format "inurl:… site:…" sudah benar)
+    # Daftar dork (format "inurl:… site:…" sudah benar)
     dorks = [
         f'inurl:wp-content site:{site_domain}',
         f'inurl:wp-login.php site:{site_domain}',
@@ -96,6 +100,9 @@ def get_wp_targets_cse(
 
     found_urls = set()
     base_url = "https://www.googleapis.com/customsearch/v1"
+
+    # Siapkan dictionary proxies jika proxy di-pasangkan
+    proxies = {"http": proxy, "https": proxy} if proxy else None
 
     # Kita mulai tiap dork
     for dork in dorks:
@@ -122,7 +129,7 @@ def get_wp_targets_cse(
 
             data = []
             try:
-                resp = requests.get(base_url, params=params, timeout=10)
+                resp = requests.get(base_url, params=params, timeout=10, proxies=proxies)
                 if resp.status_code == 200:
                     data = resp.json().get("items", [])
                 else:
@@ -165,8 +172,9 @@ def get_wp_targets_cse(
                     data = []
             # End try / except
 
+            # Setelah mencoba kedua API, jika data kosong => hentikan loop CSE
             if not data:
-                break  # hentikan loop CSE jika kedua API gagal atau tidak ada hasil
+                break
 
             # Proses data yg berhasil dipanggil (items)
             for item in data:
@@ -186,14 +194,29 @@ def get_wp_targets_cse(
 
             time.sleep(delay_between)
 
+        # << Tambahan kecil: Jika setelah loop CSE, cse_found_this_dork masih 0,
+        #    langsung skip dork ini (tanpa fallback googlesearch) jika user tidak ingin fallback. >>
+        # (Namun jika ingin fallback, baris ini bisa di-comment dan tetap gunakan blok di bawah.)
+        # if cse_found_this_dork == 0:
+        #     logging.warning(
+        #         f"⚠️ CSE API (API#1/API#2) tidak ada hasil untuk '{dork}'. Lewati dork ini."
+        #     )
+        #     break
+
         # Jika CSE API **benar‐benar** tidak mengembalikan satupun (cse_found_this_dork == 0),
-        # dan modul googlesearch‐python terinstall, baru pakai fallback:
+        # dan modul googlesearch‐python terinstall, barulah pakai fallback:
         if cse_found_this_dork == 0 and FALLBACK_GOOGLESEARCH:
             logging.info(
                 f"   ⚠️ CSE API (baik API#1 maupun API#2) tidak ada hasil untuk `{dork}`. "
                 "Fallback pakai googlesearch."
             )
             fallback_count = 0
+
+            # Jika proxy di-pasangkan, set environment bagi googlesearch
+            if proxy:
+                os.environ["HTTP_PROXY"] = proxy
+                os.environ["HTTPS_PROXY"] = proxy
+
             try:
                 for url in search(dork, num_results=per_dork_limit):
                     m = re.match(r"https?://[^/]+", url)
@@ -206,6 +229,7 @@ def get_wp_targets_cse(
             except Exception as e:
                 logging.warning(f"   ❌ Fallback googlesearch gagal (dork `{dork}`): {e}")
 
+        # Jika sudah mencapai total_limit, keluar kedalam loop
         if len(found_urls) >= total_limit:
             break
 
@@ -246,6 +270,10 @@ def main():
         help="Jeda (detik) antara setiap panggilan ke CSE API / fallback (default: 2.0)."
     )
     parser.add_argument(
+        "--proxy",
+        help="Proxy (misal: http://user:pass@host:port atau socks5://host:port)."
+    )
+    parser.add_argument(
         "--output",
         default="wp_sites_links.txt",
         help="Nama file keluaran yang berisi pure link domain (default: wp_sites_links.txt)."
@@ -256,18 +284,19 @@ def main():
     total_limit = args.limit
     per_dork_limit = args.per_dork
     delay_between = args.delay
+    proxy = args.proxy
     output_file = args.output
 
-    # 1) Baca daftar domain yg sudah tercatat
+    # 1) Baca daftar domain yang sudah tercatat
     scanned = read_scanned()
     logging.info(f"💾 Sudah pernah discrap: {len(scanned)} domain")
 
     # 2) Tarik `total_limit + scanned_count` agar nanti tetap dapat `total_limit` domain baru
     cse_fetch_limit = total_limit + len(scanned)
     logging.info(f"🚀 Mulai mengumpulkan tautan (limit+scanned={cse_fetch_limit})")
-    all_targets = get_wp_targets_cse(domain, cse_fetch_limit, per_dork_limit, delay_between)
+    all_targets = get_wp_targets_cse(domain, cse_fetch_limit, per_dork_limit, delay_between, proxy)
 
-    # 3) Filter hanya domain baru (belum pernah diskrip), lalu batasi ke `total_limit`
+    # 3) Filter hanya domain baru (belum pernah discrap), lalu batasi ke `total_limit`
     new_targets = [t for t in all_targets if t not in scanned][:total_limit]
     if not new_targets:
         logging.info("🔄 Tidak ada domain baru. Proses dihentikan.")
