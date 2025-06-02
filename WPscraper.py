@@ -92,6 +92,8 @@ def get_wp_targets_cse(
     dorks = [
         f'inurl:wp-content site:{site_domain}',
         f'inurl:wp-login.php site:{site_domain}',
+        f'inurl:"/wp-content/plugins/wp-shopping-cart/" site:{site_domain}',
+        f'inurl:"/wp-content/plugins/wp-dbmanager/" site:{site_domain}',
         f'inurl:"/wp-content/themes/" site:{site_domain}',
         f'inurl:readme.html site:{site_domain}',
         f'"Powered by WordPress" site:{site_domain}',
